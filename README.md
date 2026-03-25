@@ -1,4 +1,4 @@
-# Aplicação de Restauração do Proxmox Backup
+# Aplicação para Automação de Restauração de VMs para validação de integridade
 
 Esta aplicação automatiza a restauração de backups de máquinas virtuais a partir de um Proxmox Backup Server (PBS) para um nó Proxmox VE (PVE).
 O sistema lê uma lista de máquinas virtuais/containers, busca os backups mais recentes de cada uma, as restaura (sobrescrevendo se necessário) e envia um relatório de status para um grupo no Telegram.
