@@ -69,7 +69,14 @@ crontab -e
 Adicione uma linha como a do exemplo abaixo. Este exemplo está programado para executar **toda segunda-feira de madrugada, às 02h00**:
 
 ```bash
-0 2 * * 1 cd /home/tacio/projetos/pbs-restore && /home/tacio/projetos/pbs-restore/venv/bin/python main.py >> /home/tacio/projetos/pbs-restore/restauracao.log 2>&1
+0 2 * * 1 cd /home/tacio/projetos/pve-vm-automate-restore && /home/tacio/projetos/pve-vm-automate-restore/venv/bin/python main.py >> /home/tacio/projetos/pve-vm-automate-restore/restauracao.log 2>&1
 ```
 
-> **Nota:** Certifique-se de substituir o caminho `/home/tacio/projetos/pbs-restore` nas três vezes que aparece pela pasta definitiva caso mova a aplicação de lugar. O trecho ao final (`>> restauracao.log 2>&1`) armazena a saída da execução em um arquivinho de log, sendo excelente para revisar caso a rotina demore ou precise investigar algo futuramente!
+> **Nota:** Certifique-se de substituir o caminho `/home/tacio/projetos/pve-vm-automate-restore` nas três vezes que aparece pela pasta definitiva caso mova a aplicação de lugar. O trecho ao final (`>> restauracao.log 2>&1`) armazena a saída da execução em um arquivinho de log, sendo excelente para revisar caso a rotina demore ou precise investigar algo futuramente!
+
+## Próximas funcionalidades
+- Adicionar alguma forma de integração com alguma IA como o Claude Cowork ou outra que tenha acesso a um navegador para que ele possa acessar a interface web do Proxmox e realizar a validação se o Sistema Operacional subiu ou não após o backup
+
+- Gerar um relatório em HTML exportável para PDF com o status de cada VM restaurada, para que possa ser salvo e entregue como prova de que a restauração foi realizada com sucesso
+
+- Adicionar uma flag no .env que liste o backup de todas as VMs executados nos ultimos 7 dias e que ainda não estão listados no arquivo vms.txt, para que possa ser adicionado automaticamente para homologação futura
