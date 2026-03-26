@@ -8,6 +8,14 @@ from proxmoxer import ProxmoxAPI
 from PIL import Image
 import threading
 import subprocess
+import json
+from google import genai
+
+# Lock global para atualização segura do dicionário de resultados
+results_lock = threading.Lock()
+# Dicionário global para armazenar os dados de cada VM restaurada
+# No formato: { vmid: { 'status_msg': ..., 'duration_str': ..., 'ia_status': ..., 'alert_msg': ... } }
+restoration_results = {}
 
 # Disable insecure request warnings when verify_ssl=False
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -20,6 +28,13 @@ def load_config():
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SCREENSHOT_WAIT_MINUTES",
         "PROXMOX_TIMEOUT", "AUTO_START_VM"
     ]
+    
+    # Opcionais dependendo do ANALYZE_WITH_GEMINI
+    analyze_with_gemini = os.getenv("ANALYZE_WITH_GEMINI", "False").lower() == "true"
+    if analyze_with_gemini:
+        required.append("GEMINI_API_KEY")
+        required.append("GEMINI_MODEL")
+
     config = {}
     for req in required:
         val = os.getenv(req)
@@ -43,6 +58,7 @@ def load_config():
         raise ValueError("O parâmetro PROXMOX_TIMEOUT precisa ser um número inteiro")
         
     config["AUTO_START_VM"] = os.getenv("AUTO_START_VM", "True").lower() == "true"
+    config["ANALYZE_WITH_GEMINI"] = analyze_with_gemini
         
     return config
 
@@ -196,8 +212,93 @@ def get_proxmox_client(config):
         timeout=config["PROXMOX_TIMEOUT"]
     )
 
-def wait_and_screenshot(config, vmid):
+# Envia para o Gemini a imagem para checar se o SO está ok
+def analyze_image_with_gemini(image_path, config):
+    """Envia a imagem para o Google Gemini API tentando diferentes modelos de fallback."""
+    try:
+        # Lista de modelos para tentar (do mais provável para o menos provável)
+        models_to_try = [
+            config.get("GEMINI_MODEL", "gemini-1.5-flash"),
+            "gemini-1.5-flash",
+            "gemini-flash-latest",
+            "gemini-1.5-flash-001"
+        ]
+        
+        # Remove duplicatas mantendo a ordem
+        models_to_try = list(dict.fromkeys(models_to_try))
+        
+        client = genai.Client(api_key=config["GEMINI_API_KEY"])
+        
+        prompt = """
+Analise a imagem. Responda APENAS com JSON válido, sem explicações:
+
+{
+  "boot_concluido": true/false,
+  "estado": "login"|"bloqueio"|"area_trabalho"|"app_aberto"|"shell"|"erro"|"atualizando"|"tela_preta"|"indeterminado",
+  "os_detectado": "windows"|"linux"|"indeterminado",
+  "confianca": "alta"|"media"|"baixa"
+}
+
+BOOT_CONCLUIDO=false se houver: logo de fabricante, POST, "BIOS"/"UEFI", GRUB/bootloader, animação de boot, mensagens de kernel ("[OK]", "Starting", "systemd"), tela de atualização ("Não desligue", "Configurando atualizações"), BSOD/tela azul, "Recuperação"/"Reparo Automático"/"WinRE". Caso contrário: true.
+
+ESTADO (use o primeiro que se aplicar):
+- erro: BSOD, tela azul, "Reparo Automático", "Automatic Repair", "Recovery"
+- atualizando: "Não desligue", "Configurando atualizações X%", "Windows Update"
+- tela_preta: imagem preta ou sem conteúdo identificável
+- login: campo de senha, lista de usuários, "Ctrl+Alt+Delete"/"Pressione Ctrl+Alt+Delete", "Sign in", prompt TTY ("login:", "Password:"), tela de login gráfico Linux
+- bloqueio: relógio/data em destaque, sem campo de senha visível
+- shell: prompt CMD ("C:\\"), PowerShell ("PS C:\\"), bash/zsh ("$","#","user@host")
+- area_trabalho: ícones, barra de tarefas/dock, papel de parede sem login/bloqueio
+- app_aberto: janela de aplicativo em primeiro plano
+- indeterminado: nenhuma categoria aplicável
+
+OS_DETECTADO:
+- windows: logo Windows, barra de tarefas com Iniciar, CMD/PowerShell, interface Fluent
+- linux: prompt shell Linux, logo de distro, GRUB, GNOME/KDE/XFCE
+- indeterminado: não identificável
+
+CONFIANCA: alta=elementos claros / media=parcialmente visíveis / baixa=borrado, recortado ou contraditório
+        """
+        
+        img = Image.open(image_path)
+        
+        for model_name in models_to_try:
+            try:
+                print(f"DEBUG: [Thread Screenshot] Tentando modelo {model_name} para {image_path}...")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[prompt, img]
+                )
+                
+                # Tenta extrair o JSON da resposta
+                text = response.text.strip()
+                if "```json" in text:
+                    text = text.split("```json")[1].split("```")[0].strip()
+                
+                data = json.loads(text)
+                print(f"DEBUG: [Thread Screenshot] Sucesso com o modelo {model_name}. Resultado: {data}")
+                return data
+            except Exception as e:
+                print(f"DEBUG: [Thread Screenshot] Modelo {model_name} falhou: {e}")
+                continue
+        
+        return None
+        
+    except Exception as e:
+        print(f"DEBUG: [Thread Screenshot] Falha geral na análise com Gemini: {e}")
+        return None
+
+def wait_and_screenshot(config, vmid, is_container):
     """Aguarda o tempo configurado e captura uma screenshot da VM restaurada."""
+    
+    # Se for container, não tentamos tirar print pois o Proxmox/QEMU não suporta
+    if is_container:
+        print(f"DEBUG: [Thread Screenshot] Ignorando captura de tela para VMID {vmid} (Container LXC não suportado).")
+        with results_lock:
+            if vmid in restoration_results:
+                restoration_results[vmid]['ia_status'] = "⚠️ N/A (LXC Container)"
+        return
+
     wait_time = config["SCREENSHOT_WAIT_MINUTES"] * 60
     print(f"DEBUG: [Thread Screenshot] Aguardando {config['SCREENSHOT_WAIT_MINUTES']} minutos para capturar screenshot da VM {vmid}...")
     time.sleep(wait_time)
@@ -243,6 +344,23 @@ def wait_and_screenshot(config, vmid):
             img.close()
             os.remove(local_ppm)
             print(f"DEBUG: [Thread Screenshot] Screenshot salva com sucesso: {local_jpg}")
+            
+            # --- Análise via IA ---
+            ia_label = "Falta análise"
+            if config["ANALYZE_WITH_GEMINI"]:
+                ia_data = analyze_image_with_gemini(local_jpg, config)
+                if ia_data:
+                    if ia_data.get("boot_concluido") is True:
+                        ia_label = "✅ OK"
+                    else:
+                        ia_label = f"❌ Erro detectado ({ia_data.get('estado')})"
+                else:
+                    ia_label = "⚠️ Falha na análise IA"
+                
+                # Atualiza o dicionário global
+                with results_lock:
+                    if vmid in restoration_results:
+                        restoration_results[vmid]['ia_status'] = ia_label
         
         # --- Passo 4: remove o PPM temporário do servidor Proxmox ---
         subprocess.run(
@@ -413,7 +531,7 @@ def main():
                             proxmox.nodes(node).qemu(vmid).status.start.post()
                         
                         # Inicia o processo de screenshot em paralelo
-                        t = threading.Thread(target=wait_and_screenshot, args=(config, vmid), daemon=False)
+                        t = threading.Thread(target=wait_and_screenshot, args=(config, vmid, is_container), daemon=False)
                         t.start()
                         screenshot_threads.append(t)
                     except Exception as e:
@@ -428,16 +546,15 @@ def main():
             print(f"Exceção ocorrida durante restore da VM {vmid}: {e}")
             status_msg = "❌ Erro interno"
             
-        if duration_str:
-            msg = f"{status_msg} - VMID: <code>{vmid}</code> - <b>Nome:</b> {vm_name}\nTempo de restauração: {duration_str}"
-            if alert_msg:
-                msg += f"\n{alert_msg}"
-            report_lines.append(msg)
-        else:
-            msg = f"{status_msg} - VMID: <code>{vmid}</code> - <b>Nome:</b> {vm_name}"
-            if alert_msg:
-                msg += f"\n{alert_msg}"
-            report_lines.append(msg)
+        with results_lock:
+            restoration_results[vmid] = {
+                'status_msg': status_msg,
+                'vmid': vmid,
+                'vm_name': vm_name,
+                'duration_str': duration_str,
+                'alert_msg': alert_msg,
+                'ia_status': "Não verificado" if not config["AUTO_START_VM"] else "Aguardando análise"
+            }
         
         # Rotaciona a VM para o final do arquivo vms.txt (Round-Robin)
         print(f"Rotacionando VM {vmid} para o fim da lista (Round-Robin)...")
@@ -449,8 +566,37 @@ def main():
         for t in screenshot_threads:
             t.join()
 
+    # Monta o relatório consolidado
+    print("\n--- Gerando relatório final ---")
+    for vmid in vms_to_restore:
+        with results_lock:
+            res = restoration_results.get(vmid)
+        if not res: continue
+        
+        line = f"############################\n\n"
+        # Ajuste de ícones baseado no status
+        if "Ignorada" in res['status_msg']:
+            line += f"🦘 VMID: <code>{res['vmid']}</code> - Ignorada\n<b>Motivo:</b> ID já em uso\n\n"
+        elif "Ausente" in res['status_msg']:
+             line += f"❌ Ausente - VMID: <code>{res['vmid']}</code> - <b>Status:</b> Sem backup!\n\n"
+        else:
+            line += f"{res['status_msg']} - VMID: <code>{res['vmid']}</code> - <b>Nome:</b> {res['vm_name']}\n"
+            if res['duration_str']:
+                line += f"Tempo de restauração: {res['duration_str']}\n"
+                
+            if config["AUTO_START_VM"] and config["ANALYZE_WITH_GEMINI"]:
+                line += f"Status segundo IA: {res['ia_status']}\n"
+            
+            if res['alert_msg']:
+                line += f"{res['alert_msg']}\n"
+            line += "\n"
+        
+        report_lines.append(line)
+        # Exibe no console também
+        print(line.replace("<b>","").replace("</b>","").replace("<code>","").replace("</code>",""))
+
     report_lines.append("\n🤖 <b>Por favor, verifique no Proxmox se as máquinas foram restauradas corretamente.</b>")
-    final_report = "\n".join(report_lines)
+    final_report = "".join(report_lines)
     
     print("\nDisparando relatório no Telegram...")
     send_telegram_message(config["TELEGRAM_BOT_TOKEN"], config["TELEGRAM_CHAT_ID"], final_report)

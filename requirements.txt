@@ -2,3 +2,4 @@ proxmoxer
 requests
 python-dotenv
 Pillow
+google-genai

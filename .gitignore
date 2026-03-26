@@ -51,6 +51,9 @@ Thumbs.db
 # Remove o vms.txt do git
 vms.txt
 
+# Remove os prints do git
+prints/*
+
 # Exceções (arquivos que não devem ser ignorados)
 !requirements.txt
 !.env.example
