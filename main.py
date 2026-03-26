@@ -211,7 +211,7 @@ def wait_and_screenshot(config, vmid):
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     remote_ppm = f"/tmp/screenshot_{vmid}_{timestamp}.ppm"
     local_ppm = os.path.join(output_dir, f"{vmid}_{timestamp}.ppm")
-    local_png = os.path.join(output_dir, f"{vmid}_{timestamp}.png")
+    local_jpg = os.path.join(output_dir, f"{vmid}_{timestamp}.jpg")
 
     print(f"DEBUG: [Thread Screenshot] Capturando screenshot da VM {vmid}...")
 
@@ -236,13 +236,13 @@ def wait_and_screenshot(config, vmid):
             print(f"DEBUG: [Thread Screenshot] Falha no SCP: {scp.stderr.strip()}")
             return
 
-        # --- Passo 3: converte PPM -> PNG com Pillow ---
+        # --- Passo 3: converte PPM -> JPG com Pillow ---
         if os.path.exists(local_ppm):
-            img = Image.open(local_ppm)
-            img.save(local_png, "PNG")
+            img = Image.open(local_ppm).convert("RGB")
+            img.save(local_jpg, "JPEG", quality=90, optimize=True)
             img.close()
             os.remove(local_ppm)
-            print(f"DEBUG: [Thread Screenshot] Screenshot salva com sucesso: {local_png}")
+            print(f"DEBUG: [Thread Screenshot] Screenshot salva com sucesso: {local_jpg}")
         
         # --- Passo 4: remove o PPM temporário do servidor Proxmox ---
         subprocess.run(
