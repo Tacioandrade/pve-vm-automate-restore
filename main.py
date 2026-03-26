@@ -5,6 +5,9 @@ import requests
 import urllib3
 from dotenv import load_dotenv
 from proxmoxer import ProxmoxAPI
+from PIL import Image
+import threading
+import subprocess
 
 # Disable insecure request warnings when verify_ssl=False
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -14,7 +17,8 @@ def load_config():
     required = [
         "PROXMOX_URL", "PROXMOX_NODE", "PROXMOX_USER", "PROXMOX_PASSWORD", 
         "BACKUP_STORAGE", "RESTORE_STORAGE", "VM_RESTORE_COUNT",
-        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SCREENSHOT_WAIT_MINUTES",
+        "PROXMOX_TIMEOUT", "AUTO_START_VM"
     ]
     config = {}
     for req in required:
@@ -27,6 +31,18 @@ def load_config():
         config["VM_RESTORE_COUNT"] = int(config["VM_RESTORE_COUNT"])
     except ValueError:
         raise ValueError("O parâmetro VM_RESTORE_COUNT precisa ser um número inteiro")
+        
+    try:
+        config["SCREENSHOT_WAIT_MINUTES"] = int(config["SCREENSHOT_WAIT_MINUTES"])
+    except ValueError:
+        raise ValueError("O parâmetro SCREENSHOT_WAIT_MINUTES precisa ser um número inteiro")
+        
+    try:
+        config["PROXMOX_TIMEOUT"] = int(config.get("PROXMOX_TIMEOUT", 60))
+    except ValueError:
+        raise ValueError("O parâmetro PROXMOX_TIMEOUT precisa ser um número inteiro")
+        
+    config["AUTO_START_VM"] = os.getenv("AUTO_START_VM", "True").lower() == "true"
         
     return config
 
@@ -176,8 +192,68 @@ def get_proxmox_client(config):
         port=port,
         user=config["PROXMOX_USER"],
         password=config["PROXMOX_PASSWORD"],
-        verify_ssl=False
+        verify_ssl=False,
+        timeout=config["PROXMOX_TIMEOUT"]
     )
+
+def wait_and_screenshot(config, vmid):
+    """Aguarda o tempo configurado e captura uma screenshot da VM restaurada."""
+    wait_time = config["SCREENSHOT_WAIT_MINUTES"] * 60
+    print(f"DEBUG: [Thread Screenshot] Aguardando {config['SCREENSHOT_WAIT_MINUTES']} minutos para capturar screenshot da VM {vmid}...")
+    time.sleep(wait_time)
+    
+    node = config["PROXMOX_NODE"]
+    proxmox_host = config["PROXMOX_URL"].replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
+    
+    output_dir = "prints"
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    remote_ppm = f"/tmp/screenshot_{vmid}_{timestamp}.ppm"
+    local_ppm = os.path.join(output_dir, f"{vmid}_{timestamp}.ppm")
+    local_png = os.path.join(output_dir, f"{vmid}_{timestamp}.png")
+
+    print(f"DEBUG: [Thread Screenshot] Capturando screenshot da VM {vmid}...")
+
+    try:
+        # Re-conecta para garantir que a sessão esteja ativa na thread
+        proxmox = get_proxmox_client(config)
+        
+        # --- Passo 1: envia screendump ao monitor QEMU ---
+        proxmox.nodes(node).qemu(vmid).monitor.post(command=f"screendump {remote_ppm}")
+        print(f"DEBUG: [Thread Screenshot] Screendump gerado no host: {remote_ppm}")
+        time.sleep(1)
+
+        # --- Passo 2: baixa o PPM via SCP ---
+        print(f"DEBUG: [Thread Screenshot] Baixando arquivo do host Proxmox via SCP...")
+        scp = subprocess.run(
+            ["scp", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+             f"root@{proxmox_host}:{remote_ppm}", local_ppm],
+            capture_output=True, text=True
+        )
+        
+        if scp.returncode != 0:
+            print(f"DEBUG: [Thread Screenshot] Falha no SCP: {scp.stderr.strip()}")
+            return
+
+        # --- Passo 3: converte PPM -> PNG com Pillow ---
+        if os.path.exists(local_ppm):
+            img = Image.open(local_ppm)
+            img.save(local_png, "PNG")
+            img.close()
+            os.remove(local_ppm)
+            print(f"DEBUG: [Thread Screenshot] Screenshot salva com sucesso: {local_png}")
+        
+        # --- Passo 4: remove o PPM temporário do servidor Proxmox ---
+        subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+             f"root@{proxmox_host}", f"rm -f {remote_ppm}"],
+            capture_output=True
+        )
+        print(f"DEBUG: [Thread Screenshot] Arquivo temporário removido do host Proxmox.")
+
+    except Exception as e:
+        print(f"DEBUG: [Thread Screenshot] Exceção ao capturar screenshot da VM {vmid}: {e}")
 
 def main():
     try:
@@ -195,8 +271,17 @@ def main():
         proxmox = get_proxmox_client(config)
         # Test connection
         proxmox.version.get()
+        
+        # Validação extra: tenta listar as VMs no nó configurado e acessos básicos. 
+        # Se falhar (timeout ou erro de permissão), aborta imediatamente.
+        print(f"Verificando conectividade e acesso ao nó '{node}'...")
+        proxmox.nodes(node).qemu.get()
+        
+        print(f"Verificando acesso ao storage de backup '{backup_storage}'...")
+        proxmox.nodes(node).storage(backup_storage).content.get()
+        
     except Exception as e:
-        print(f"Falha na conexão com a API do Proxmox: {e}")
+        print(f"❌ Falha crítica na conexão ou acesso aos recursos do Proxmox: {e}")
         return
 
     try:
@@ -211,6 +296,7 @@ def main():
 
     print(f"Iniciando o processo de restauração para {len(vms_to_restore)} VMs...")
     report_lines = ["<b>Relatório de Restauração do Proxmox</b> \n"]
+    screenshot_threads = []
     
     for vmid in vms_to_restore:
         print(f"\n--- Processando VMID: {vmid} ---")
@@ -316,6 +402,24 @@ def main():
                 vm_name = get_vm_name_from_system(proxmox, node, vmid, is_container)
                 print(f"✅ Restauração da VM {vmid} - {vm_name} concluída com sucesso.")
                 status_msg = "✅ Sucesso"
+                
+                # Inicia o processo de screenshot se AUTO_START_VM for True
+                if config["AUTO_START_VM"]:
+                    try:
+                        print(f"Iniciando a VM {vmid} para verificação...")
+                        if is_container:
+                            proxmox.nodes(node).lxc(vmid).status.start.post()
+                        else:
+                            proxmox.nodes(node).qemu(vmid).status.start.post()
+                        
+                        # Inicia o processo de screenshot em paralelo
+                        t = threading.Thread(target=wait_and_screenshot, args=(config, vmid), daemon=False)
+                        t.start()
+                        screenshot_threads.append(t)
+                    except Exception as e:
+                        print(f"Erro ao iniciar a VM {vmid}: {e}")
+                else:
+                    print(f"A VM {vmid} não foi iniciada (AUTO_START_VM = False). Captura de screenshot ignorada.")
             else:
                 print(f"❌ Tarefa de restauração da VM {vmid} falhou com status: {exitstatus}")
                 status_msg = f"❌ Falha ({exitstatus})"
@@ -339,7 +443,13 @@ def main():
         print(f"Rotacionando VM {vmid} para o fim da lista (Round-Robin)...")
         rotate_vm("vms.txt", vmid)
 
-    report_lines.append("\n🤖 <b>Por favor, verifique ndo Proxmox se as máquinas foram restauradas corretamente.</b>")
+    # Aguarda todas as screenshots terminarem antes de enviar o Telegram
+    if screenshot_threads:
+        print("\n--- Finalizando capturas de tela agendadas ---")
+        for t in screenshot_threads:
+            t.join()
+
+    report_lines.append("\n🤖 <b>Por favor, verifique no Proxmox se as máquinas foram restauradas corretamente.</b>")
     final_report = "\n".join(report_lines)
     
     print("\nDisparando relatório no Telegram...")

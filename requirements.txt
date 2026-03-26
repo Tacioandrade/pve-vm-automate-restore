@@ -1,3 +1,4 @@
 proxmoxer
 requests
 python-dotenv
+Pillow

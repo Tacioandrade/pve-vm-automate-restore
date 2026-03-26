@@ -8,12 +8,16 @@ O sistema lê uma lista de máquinas virtuais/containers, busca os backups mais 
 - Lê uma lista alvo de VMs/containers a partir do arquivo `vms.txt` e processa uma quantidade específica definida antes da execução.
 - Localiza automaticamente o backup mais recente de cada VM/container especificado.
 - Restaura as VMs/containers em um "Storage" predeterminado.
-- Envia um relatório prático formatado em Markdown diretamente para o Telegram.
+- **Inicialização Automática**: Opcionalmente liga a VM após o restore para validação por imagem.
+- **Captura de Tela (Screenshots)**: Tira um print da tela da VM após um tempo de espera para validar visualmente se o SO iniciou.
+- Envia um relatório consolidado formatado em HTML/Markdown para o Telegram ao final de todos os processos.
 
 ## Requisitos
 - Python 3.7+
-- Proxmox VE com acesso à API habilitado
-- Um Token de Bot do Telegram e o ID do Grupo (Chat ID) desejado
+- Proxmox VE com acesso à API habilitado.
+- Acesso ao SSH sem senha com o usuário do .env: Necessário configurar chaves SSH (Pubkey) entre o servidor do script e o Proxmox para a captura de screenshots sem requisitar a senha a cada VM restaurada.
+- Um Token de Bot do Telegram e o ID do Grupo (Chat ID) desejado.
+
 
 ## Preparação do Ambiente
 
@@ -40,6 +44,9 @@ O sistema lê uma lista de máquinas virtuais/containers, busca os backups mais 
    - `VM_RESTORE_COUNT`: Quantidade de VMs (da primeira até a última linha do arquivo `vms.txt`) que deverão ser incluídas no processo.
    - `TELEGRAM_BOT_TOKEN`: A chave de integração do Bot do Telegram, gerada pelo BotFather.
    - `TELEGRAM_CHAT_ID`: O identificador do Chat/Grupo onde ele mandará o relatório da execução.
+   - `SCREENSHOT_WAIT_MINUTES`: Tempo em minutos para aguardar após ligar a VM antes de tirar o print (ex: `5`).
+   - `PROXMOX_TIMEOUT`: Tempo de espera (timeout) para chamadas longas na API (ex: `60`).
+   - `AUTO_START_VM`: `True` para ligar a VM e tirar print após o restore, `False` para apenas restaurar e manter desligada.
 
 3. **Indique quais VMs devem voltar:**
    Preencha o arquivo `vms.txt` contendo os IDs dessas VMs, colocando apenas um VMID por linha, correspondente aos backups em seu storage.
@@ -47,6 +54,20 @@ O sistema lê uma lista de máquinas virtuais/containers, busca os backups mais 
    100
    101
    ```
+
+## Configuração de Screenshot (SSH)
+
+Para que a captura de tela após a restauração da VM/Container funcione sem intervenção humana (pedindo senha), você deve gerar uma chave SSH na máquina onde o script roda e copiá-la para o nó Proxmox:
+
+```bash
+# Gere a chave se não tiver uma
+ssh-keygen -t ed25519
+
+# Copie para o servidor Proxmox (substitua pelo seu IP/Host)
+ssh-copy-id root@host-proxmox
+```
+
+O script utiliza `scp` para baixar a imagem temporária gerada no host Proxmox.
 
 ## Como Usar
 
