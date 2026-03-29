@@ -54,6 +54,10 @@ vms.txt
 # Remove os prints do git
 prints/*
 
+# Remove os logs do git
+logs/*
+
 # Exceções (arquivos que não devem ser ignorados)
 !requirements.txt
 !.env.example
+todo.md

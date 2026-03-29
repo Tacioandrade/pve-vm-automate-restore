@@ -1,103 +1,84 @@
-# Aplicação para Automação de Restauração de VMs para validação de integridade
-
-Esta aplicação automatiza a restauração de backups de máquinas virtuais a partir de um Proxmox Backup Server (PBS) para um nó Proxmox VE (PVE).
-O sistema lê uma lista de máquinas virtuais/containers, busca os backups mais recentes de cada uma, as restaura (sobrescrevendo se necessário) e envia um relatório de status para um grupo no Telegram.
-
-## Funcionalidades
-- Carrega as configurações de acesso armazenadas em um arquivo `.env`.
-- Lê uma lista alvo de VMs/containers a partir do arquivo `vms.txt` e processa uma quantidade específica definida antes da execução.
-- Localiza automaticamente o backup mais recente de cada VM/container especificado.
-- Restaura as VMs/containers em um "Storage" predeterminado.
-- **Inicialização Automática**: Opcionalmente liga a VM após o restore para validação por imagem.
-- **Captura de Tela (Screenshots)**: Tira um print da tela da VM após um tempo de espera para validar visualmente se o SO iniciou.
-- Envia um relatório consolidado formatado em HTML/Markdown para o Telegram ao final de todos os processos.
-
-## Requisitos
-- Python 3.7+
-- Proxmox VE com acesso à API habilitado.
-- Acesso ao SSH sem senha com o usuário do .env: Necessário configurar chaves SSH (Pubkey) entre o servidor do script e o Proxmox para a captura de screenshots sem requisitar a senha a cada VM restaurada.
-- Um Token de Bot do Telegram e o ID do Grupo (Chat ID) desejado.
+# Validação de Integridade de VMs para PVE 🚀
 
 
-## Preparação do Ambiente
+Esta aplicação automatiza a restauração de máquinas virtuais (VMs) e containers (LXC) a partir de um **Proxmox Backup Server (PBS)** para um nó **Proxmox VE (PVE)**, validando a integridade dos backups através de boot e análise por IA.
 
-1. **Instale as dependências:**
-   Recomenda-se a criação de um ambiente virtual Python isolado.
+## ✨ Novas Funcionalidades (v2.0)
+- **Restauração Paralela**: Agora suporta múltiplas restaurações simultâneas via `MAX_WORKERS`.
+- **Análise por IA**: Integração com **Google Gemini** para analisar screenshots e confirmar se o SO subiu corretamente.
+- **Arquitetura Modular**: Código refatorado em pacotes para melhor manutenção.
+- **Interface CLI**: Novos argumentos para maior flexibilidade sem editar o `.env`.
+- **Sistema de Logs**: Logs estruturados com rotação automática em `logs/restauracao.log`.
+- **Resiliência**: Mecanismo de Retry com Backoff exponencial para chamadas de rede e API.
+- **Modo Dry-Run**: Simule todo o processo sem realizar alterações reais no Proxmox.
+
+## 🛠️ Requisitos
+- Python 3.10+
+- Acesso à API do Proxmox VE.
+- Chaves SSH configuradas para o nó Proxmox (necessário para screenshots).
+- Google Gemini API Key (opcional, para análise de imagem).
+- Bot do Telegram (opcional, para relatórios).
+
+## 🚀 Instalação e Configuração
+
+1. **Clonar e instalar dependências:**
    ```bash
    python3 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt
    ```
 
-2. **Configure as variáveis de ambiente:**
-   Copie o template e crie seu arquivo real de ambiente:
+2. **Configurar variáveis de ambiente:**
    ```bash
    cp .env.example .env
-   ```
-   Edite o arquivo `.env` e preencha com as informações do seu ambiente:
-   - `PROXMOX_URL`: O endereço para acessar a interface web do Proxmox (exemplo: `https://192.168.1.100:8006`).
-   - `PROXMOX_NODE`: O nome do nó do Proxmox responsável pelas operações (exemplo: `pve`).
-   - `PROXMOX_USER`: O usuário do Proxmox que fará a ação (exemplo: `root@pam`).
-   - `PROXMOX_PASSWORD`: A senha vinculada ao usuário.
-   - `BACKUP_STORAGE`: O nome dado no PVE referente ao Storage do Proxmox Backup Server.
-   - `RESTORE_STORAGE`: O nome do Storage onde a VM recém-restaurada será salva.
-   - `VM_RESTORE_COUNT`: Quantidade de VMs (da primeira até a última linha do arquivo `vms.txt`) que deverão ser incluídas no processo.
-   - `TELEGRAM_BOT_TOKEN`: A chave de integração do Bot do Telegram, gerada pelo BotFather.
-   - `TELEGRAM_CHAT_ID`: O identificador do Chat/Grupo onde ele mandará o relatório da execução.
-   - `SCREENSHOT_WAIT_MINUTES`: Tempo em minutos para aguardar após ligar a VM antes de tirar o print (ex: `5`).
-   - `PROXMOX_TIMEOUT`: Tempo de espera (timeout) para chamadas longas na API (ex: `60`).
-   - `AUTO_START_VM`: `True` para ligar a VM e tirar print após o restore, `False` para apenas restaurar e manter desligada.
-
-3. **Indique quais VMs devem voltar:**
-   Preencha o arquivo `vms.txt` contendo os IDs dessas VMs, colocando apenas um VMID por linha, correspondente aos backups em seu storage.
-   ```text
-   100
-   101
+   # Edite as variáveis no .env
    ```
 
-## Configuração de Screenshot (SSH)
+3. **Lista de VMs:**
+   Crie um arquivo `vms.txt` com um VMID por linha. O script utiliza um sistema **Round-Robin**, movendo a VM processada para o final da lista após cada execução.
 
-Para que a captura de tela após a restauração da VM/Container funcione sem intervenção humana (pedindo senha), você deve gerar uma chave SSH na máquina onde o script roda e copiá-la para o nó Proxmox:
+## 💻 Uso (CLI)
 
 ```bash
-# Gere a chave se não tiver uma
-ssh-keygen -t ed25519
-
-# Copie para o servidor Proxmox (substitua pelo seu IP/Host)
-ssh-copy-id root@host-proxmox
-```
-
-O script utiliza `scp` para baixar a imagem temporária gerada no host Proxmox.
-
-## Como Usar
-
-Basta rodar o script principal do Python no mesmo diretório:
-```bash
+# Execução padrão (usa valores do .env)
 python main.py
+
+# Restaurar 5 VMs específicas de um arquivo customizado
+python main.py --count 5 --vms lista_especial.txt
+
+# Executar em modo Simulação (Dry-Run)
+python main.py --dry-run
+
+# Desativar IA e Telegram para um teste rápido
+python main.py --no-ia --no-telegram
 ```
 
-O script tomará controle de acionar as restaurações da API de uma por vez, aguardando o final para montar as respostas válidas. Não se esqueça de adicionar o seu Bot oficial como administrador ou participante habilitado do grupo apontado no ID do Telegram.
+### Argumentos Disponíveis:
+- `--count N`: Quantidade de VMs a processar.
+- `--vms FILE`: Caminho do arquivo de lista de VMs.
+- `--dry-run`: Ativa modo de simulação.
+- `--no-ia`: Pula a análise do Google Gemini.
+- `--no-telegram`: Não envia relatório ao Telegram.
 
-## Agendamento via Crontab (Automático)
+## 📂 Estrutura do Projeto
+- `main.py`: Orquestrador principal e interface CLI.
+- `pbs_restore/`: Core da aplicação.
+    - `config.py`: Carregamento e validação de configurações.
+    - `proxmox_client.py`: Integração com a API Proxmox e lógica de polling.
+    - `gemini.py`: Integração com Google Gemini AI.
+    - `screenshot.py`: Captura de tela via Monitor QEMU e SSH/Local fallback.
+    - `report.py`: Gerenciamento de estado e contexto de restauração.
+    - `vm_manager.py`: Manipulação do arquivo de lista de VMs.
+    - `models.py`: Dataclasses para tipagem forte.
+    - `logging_config.py`: Configuração de logs rotativos.
+    - `exceptions.py`: Hierarquia de erros customizados.
 
-Para que a restauração ocorra de forma agendada e automática periodicamente, você pode configurar uma tarefa no `crontab` do Linux. É importante chamar o interpretador Python diretamente de dentro da pasta do ambiente virtual (`venv/bin/python`), para garantir que ele encontre as dependências do projeto, e executar no local onde os arquivos da aplicação estão.
+## 📊 Relatórios
+Ao final de cada execução, um relatório detalhado é enviado via Telegram contendo:
+- Resumo de sucessos, falhas e ignoradas.
+- Tempo exato de restauração de cada máquina.
+- Resultado da análise visual da IA (ex: "Boot OK").
+- Alertas de backups antigos (> 15 dias).
 
-Abra o agendador do cron digitando no terminal:
-```bash
-crontab -e
-```
-
-Adicione uma linha como a do exemplo abaixo. Este exemplo está programado para executar **toda segunda-feira de madrugada, às 02h00**:
-
-```bash
-0 2 * * 1 cd /home/tacio/projetos/pve-vm-automate-restore && /home/tacio/projetos/pve-vm-automate-restore/venv/bin/python main.py >> /home/tacio/projetos/pve-vm-automate-restore/restauracao.log 2>&1
-```
-
-> **Nota:** Certifique-se de substituir o caminho `/home/tacio/projetos/pve-vm-automate-restore` nas três vezes que aparece pela pasta definitiva caso mova a aplicação de lugar. O trecho ao final (`>> restauracao.log 2>&1`) armazena a saída da execução em um arquivinho de log, sendo excelente para revisar caso a rotina demore ou precise investigar algo futuramente!
-
-## Próximas funcionalidades
-- Adicionar alguma forma de integração com alguma IA como o Claude Cowork ou outra que tenha acesso a um navegador para que ele possa acessar a interface web do Proxmox e realizar a validação se o Sistema Operacional subiu ou não após o backup
-
-- Gerar um relatório em HTML exportável para PDF com o status de cada VM restaurada, para que possa ser salvo e entregue como prova de que a restauração foi realizada com sucesso
-
-- Adicionar uma flag no .env que liste o backup de todas as VMs executados nos ultimos 7 dias e que ainda não estão listados no arquivo vms.txt, para que possa ser adicionado automaticamente para homologação futura
+---
+Desenvolvido para garantir a paz de espírito no seu Plano de Recuperação de Desastres. 🛡️
